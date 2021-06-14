@@ -1,0 +1,65 @@
+variables:
+  DOCKER_HOST: tcp://docker:2375/
+  DOCKER_DRIVER: overlay2
+
+  CI_DOCKER_IMG: $CI_REGISTRY_IMAGE:ci-environment-$CI_COMMIT_REF_NAME
+  CI_DOCKER_IMG_FALLBACK: $CI_REGISTRY_IMAGE:ci-environment-master
+
+  GIT_SUBMODULE_STRATEGY: recursive
+
+default:
+  image: $CI_DOCKER_IMG
+  tags:
+    - gitlab-org-docker
+  services:
+    - docker:dind
+
+stages:
+  - build-ci-environment
+  - test
+  - build
+  - deploy
+
+build-ci-environment:
+  stage: build-ci-environment
+  image: docker
+  before_script: []
+  script:
+    - docker login -u "${CI_REGISTRY_USER}" -p "${CI_REGISTRY_PASSWORD}" "${CI_REGISTRY}"
+    - docker pull "${CI_DOCKER_IMG}" || docker pull "${CI_DOCKER_IMG_FALLBACK}" || true
+    - docker build --cache-from "${CI_DOCKER_IMG}","${CI_DOCKER_IMG_FALLBACK}" -t "${CI_DOCKER_IMG}" .
+    - docker push "${CI_DOCKER_IMG}"
+
+test:
+  stage: test
+  script:
+    - npm install
+    - npm run test
+
+build:
+  stage: build
+  script:
+    - npm install
+    - npm run build
+    - apk add zip
+    - npm run zip
+  artifacts:
+    paths:
+      - backend-template.zip
+
+deploy:
+  image: python:latest
+  stage: deploy
+  only:
+    refs:
+      - master
+  script:
+    - pip install awscli
+    - aws configure set aws_access_key_id $AWS_ACCESS_KEY_ID
+    - aws configure set aws_secret_access_key $AWS_SECRET_ACCESS_KEY
+    - aws configure set region $AWS_DEFAULT_REGION
+    - aws s3 cp backend-template.zip s3://elasticbeanstalk-us-east-1-662847148582/backend-template-$CI_PIPELINE_ID.zip
+    - aws elasticbeanstalk create-application-version --application-name backend-template --version-label backend-template-$CI_PIPELINE_ID --source-bundle S3Bucket=elasticbeanstalk-us-east-1-662847148582,S3Key=backend-template-$CI_PIPELINE_ID.zip
+    - aws elasticbeanstalk update-environment --application-name backend-template --environment-name BackendTemplate-env-1 --version-label backend-template-$CI_PIPELINE_ID
+  dependencies:
+    - build
